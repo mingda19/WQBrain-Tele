@@ -231,9 +231,12 @@ async def relogin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _authenticate(context, update.effective_chat.id)
 
 
-async def _authenticate(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Shared by /login, /relogin and the warning's Re-login button."""
-    brain = _brain(context)
+def persona_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Build the callback BrainSession uses to hand over a biometric link.
+
+    Shared with the /sim flow, which may need to top the session up before
+    dispatching a simulation.
+    """
 
     async def on_persona(url: str) -> None:
         await context.bot.send_message(
@@ -248,6 +251,14 @@ async def _authenticate(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
                 [[InlineKeyboardButton("I've completed it", callback_data=CB_PERSONA_DONE)]]
             ),
         )
+
+    return on_persona
+
+
+async def _authenticate(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Shared by /login, /relogin and the warning's Re-login button."""
+    brain = _brain(context)
+    on_persona = persona_prompt(context, chat_id)
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     try:
@@ -361,7 +372,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if brain.login_in_progress:
             return
         await brain.logout()
-        await _authenticate(None, context, chat_id)
+        await _authenticate(context, chat_id)
         return
 
     if query.data == CB_SNOOZE:
@@ -403,4 +414,6 @@ def register(app: Application, config: Config) -> None:
     app.add_handler(CommandHandler("status", status, filters=allowed))
     app.add_handler(CommandHandler("whoami", whoami, filters=allowed))
     app.add_handler(CommandHandler("logout", logout, filters=allowed))
-    app.add_handler(CallbackQueryHandler(on_button))
+    # Scoped by pattern so it does not swallow the /sim conversation's buttons,
+    # which use the "sim:" prefix and are owned by its ConversationHandler.
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(persona|session):"))

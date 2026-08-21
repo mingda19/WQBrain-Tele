@@ -218,6 +218,25 @@ class BrainSession:
 
     # ------------------------------------------------------------------ calls
 
+    async def ensure_fresh(self, min_seconds: float, on_persona: PersonaCallback) -> bool:
+        """Guarantee at least ``min_seconds`` of session before dispatching work.
+
+        ACE's own top-of-function refresh is disarmed (see
+        ``install_session_guards``), so this is the only thing keeping a long
+        simulation from running off the end of its session. Returns False if a
+        re-login was needed and failed.
+        """
+        if not self.is_authenticated:
+            return False
+        if await self.refresh_expiry() >= min_seconds:
+            return True
+        log.info("Session below %.0fs before dispatch; re-logging in", min_seconds)
+        try:
+            await self.login(on_persona)
+        except BrainAuthError:
+            return False
+        return True
+
     async def run_ace(self, func: Callable[..., T], *args, **kwargs) -> T:
         """Run a blocking ACE function off the event loop, session injected.
 

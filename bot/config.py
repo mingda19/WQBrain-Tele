@@ -74,6 +74,9 @@ class Config:
         self.brain_password = _require("BRAIN_CREDENTIAL_PASSWORD")
         self.warn_before_expiry_seconds = _positive_int("WARN_BEFORE_EXPIRY_SECONDS", 300)
         self.reconcile_seconds = _positive_int("SESSION_RECONCILE_SECONDS", 600)
+        self.max_concurrent_sims = _positive_int("BRAIN_MAX_CONCURRENT_SIMS", 3)
+        self.db_path = DATA_DIR / "alphas.db"
+        self.export_path = DATA_DIR / "alphas.csv"
         self.brain_api_url = (
             os.environ.get("BRAIN_API_URL", "").strip() or DEFAULT_BRAIN_API_URL
         ).rstrip("/")

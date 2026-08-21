@@ -2,10 +2,12 @@
 
 import logging
 import sys
+import warnings
 
 import requests
 from telegram.error import InvalidToken, NetworkError
 from telegram.ext import Application
+from telegram.warnings import PTBUserWarning
 
 from bot.config import Config, ConfigError
 
@@ -59,8 +61,11 @@ def main() -> int:
         return 1
 
     # Imported after Config() so .env is loaded before ace_lib reads BRAIN_API_URL.
-    from bot import handlers
+    from bot import handlers, sim_handlers
+    from bot.alpha_spec import SettingsCatalog
     from bot.brain_session import BrainSession
+    from bot.simulation import SimulationRunner
+    from bot.store import AlphaStore
 
     if not config.allowed_chat_ids:
         log.warning(
@@ -77,11 +82,21 @@ def main() -> int:
         .concurrent_updates(True)
         .build()
     )
+    brain = BrainSession(config)
     app.bot_data["config"] = config
-    app.bot_data["brain"] = BrainSession(config)
+    app.bot_data["brain"] = brain
     app.bot_data["warned"] = False
+    app.bot_data["catalog"] = SettingsCatalog()
+    app.bot_data["store"] = AlphaStore(config.db_path)
+    app.bot_data["runner"] = SimulationRunner(brain, config.max_concurrent_sims)
 
+    # The /sim conversation deliberately mixes message and callback handlers and
+    # edits one settings card in place, so per-message tracking is not wanted.
+    warnings.filterwarnings(
+        "ignore", message=".*per_message=False.*", category=PTBUserWarning
+    )
     handlers.register(app, config)
+    sim_handlers.register(app, config)
 
     log.info(
         "Starting as @%s | BRAIN API: %s | %d authorised chat(s)",
