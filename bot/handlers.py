@@ -372,7 +372,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if brain.login_in_progress:
             return
         await brain.logout()
-        await _authenticate(None, context, chat_id)
+        await _authenticate(context, chat_id)
         return
 
     if query.data == CB_SNOOZE:
