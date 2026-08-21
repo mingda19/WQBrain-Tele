@@ -1,0 +1,4 @@
+# Telegram bot layer. Kept separate from ACE_API/requirements.txt,
+# which stays exactly as WorldQuant ships it.
+python-telegram-bot[job-queue]>=21.0
+python-dotenv>=1.0.0
