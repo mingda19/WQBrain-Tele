@@ -269,6 +269,11 @@ async def sim_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def sim_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     field = context.user_data.get("editing")
+    if field not in ("decay", "truncation") or "spec" not in context.user_data:
+        await update.effective_message.reply_text(
+            "That edit expired. Send /sim to start again."
+        )
+        return ConversationHandler.END
     text = update.effective_message.text or ""
     parser = parse_decay if field == "decay" else parse_truncation
 
