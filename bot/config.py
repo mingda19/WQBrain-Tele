@@ -75,6 +75,11 @@ class Config:
         self.warn_before_expiry_seconds = _positive_int("WARN_BEFORE_EXPIRY_SECONDS", 300)
         self.reconcile_seconds = _positive_int("SESSION_RECONCILE_SECONDS", 600)
         self.max_concurrent_sims = _positive_int("BRAIN_MAX_CONCURRENT_SIMS", 3)
+        self.fields_page_size = _positive_int("FIELDS_PAGE_SIZE", 8)
+        # BRAIN's own ceiling for one multi-simulation is 10.
+        self.multi_sim_bundle_size = min(
+            _positive_int("MULTI_SIM_BUNDLE_SIZE", 10), 10
+        )
         self.db_path = DATA_DIR / "alphas.db"
         self.export_path = DATA_DIR / "alphas.csv"
         self.brain_api_url = (

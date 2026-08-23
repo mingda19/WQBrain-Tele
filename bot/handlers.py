@@ -46,6 +46,20 @@ async def _reply(update: Update, text: str, **kwargs) -> None:
     )
 
 
+async def _set_worker(context: ContextTypes.DEFAULT_TYPE, *, running: bool) -> None:
+    """Run the queue worker only while there is a session for it to use.
+
+    Tolerates a missing worker so the session handlers stay testable on their own.
+    """
+    worker = context.application.bot_data.get("worker")
+    if worker is None:
+        return
+    if running:
+        worker.start()
+    else:
+        await worker.stop()
+
+
 # ------------------------------------------------------------- expiry timers
 
 
@@ -282,6 +296,7 @@ async def _authenticate(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
     context.application.bot_data["warned"] = False
     _arm_session_timers(context, chat_id, remaining, already_warned=False)
     _start_reconciler(context, chat_id)
+    await _set_worker(context, running=True)
 
     cfg = _config(context)
     await context.bot.send_message(
@@ -347,6 +362,7 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await brain.logout()
     _cancel_jobs(context, WARNING_JOB, EXPIRED_JOB, RECONCILE_JOB)
     context.application.bot_data["warned"] = False
+    await _set_worker(context, running=False)
     await _reply(update, "Session dropped and timers cleared.")
 
 
