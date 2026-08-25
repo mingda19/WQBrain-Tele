@@ -283,11 +283,10 @@ async def _show_choices(update: Update, context, field: str) -> int:
 
 
 def _options_for(context, field: str) -> list:
-    """Union of what every currently-selected region/delay allows.
+    """Options valid for the currently-selected region/delay combinations.
 
-    A region sweep widens the options rather than picking one region's list --
-    ``SweepSettings.reconcile`` then drops anything that survives here but is not
-    valid for the final combination.
+    For universe and neutralization, only shows values valid for EVERY
+    region-delay pair in the Cartesian product.
     """
     catalog = _catalog(context)
     sweep = _sweep(context)
@@ -300,14 +299,15 @@ def _options_for(context, field: str) -> list:
         return sorted({d for r in sweep.values("region") for d in catalog.delays(r)})
 
     lookup = catalog.universes if field == "universe" else catalog.neutralizations
-    return sorted(
-        {
-            value
-            for r in sweep.values("region")
-            for d in sweep.values("delay")
-            for value in lookup(r, d)
-        }
-    )
+    region_delay_pairs = [
+        (r, d) for r in sweep.values("region") for d in sweep.values("delay")
+    ]
+    if not region_delay_pairs:
+        return []
+    allowed = set(lookup(region_delay_pairs[0][0], region_delay_pairs[0][1]))
+    for r, d in region_delay_pairs[1:]:
+        allowed &= set(lookup(r, d))
+    return sorted(allowed)
 
 
 async def got_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
