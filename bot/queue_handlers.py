@@ -230,12 +230,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if action == "tog":
         field, raw = parts[2], parts[3]
         sweep = _sweep(context)
+        draft = _draft(context)
         try:
             sweep.toggle(field, raw)
         except SweepError as exc:
             await query.answer(str(exc), show_alert=True)
             return SETTINGS
-        _draft(context).pop("specs", None)
+        draft.pop("specs", None)
         await query.answer(f"{LABELS[field]}: {len(sweep.values(field))} selected")
         return await _show_choices(update, context, field)
 
@@ -327,6 +328,7 @@ async def got_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     draft.pop("specs", None)
     draft.pop("editing", None)
+    draft.pop("specs", None)
     return await _show_settings(update, context, edit=False)
 
 

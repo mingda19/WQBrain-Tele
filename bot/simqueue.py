@@ -276,6 +276,11 @@ class QueueWorker:
                             self._queue.finish, row["id"], error="worker error"
                         )
                 log.exception("Queue worker iteration failed")
+                if bundle:
+                    for row in bundle:
+                        await asyncio.to_thread(
+                            self._queue.finish, row["id"], error="bundle processing failed"
+                        )
                 await asyncio.sleep(5)
 
     async def _run_bundle(self, rows: list[sqlite3.Row]) -> None:
