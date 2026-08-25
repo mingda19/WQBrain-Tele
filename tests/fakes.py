@@ -109,6 +109,44 @@ class FakeBot:
         return [m["text"] for m in self.messages]
 
 
+class FakeCallbackQuery:
+    def __init__(self, data):
+        self.data = data
+        self.answers = []
+        self.edits = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append(text)
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append(text)
+
+
+class FakeChat:
+    def __init__(self, chat_id):
+        self.id = chat_id
+
+
+class FakeMessage:
+    def __init__(self, text=""):
+        self.text = text
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append(text)
+
+
+class FakeUpdate:
+    """Enough of an Update for a callback-query or message handler."""
+
+    def __init__(self, chat_id, *, callback_data=None, text=""):
+        self.callback_query = (
+            FakeCallbackQuery(callback_data) if callback_data is not None else None
+        )
+        self.effective_chat = FakeChat(chat_id)
+        self.effective_message = FakeMessage(text)
+
+
 class FakeApplication:
     def __init__(self, config, brain=None):
         self.bot_data = {"config": config, "brain": brain, "warned": False}

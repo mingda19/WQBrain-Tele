@@ -50,7 +50,35 @@ CREATE TABLE IF NOT EXISTS alphas (
 CREATE INDEX IF NOT EXISTS idx_alphas_sharpe ON alphas(sharpe);
 CREATE INDEX IF NOT EXISTS idx_alphas_all_passed ON alphas(all_passed);
 CREATE INDEX IF NOT EXISTS idx_alphas_created ON alphas(created_at);
+
+CREATE TABLE IF NOT EXISTS sim_queue (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id        TEXT NOT NULL,
+    chat_id         INTEGER NOT NULL,
+    expression      TEXT NOT NULL,
+    region          TEXT,
+    universe        TEXT,
+    delay           INTEGER,
+    decay           INTEGER,
+    neutralization  TEXT,
+    truncation      REAL,
+    test_period     TEXT,
+    state           TEXT NOT NULL,
+    queued_at       TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    alpha_id        TEXT,
+    error           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_queue_state ON sim_queue(state);
+CREATE INDEX IF NOT EXISTS idx_queue_batch ON sim_queue(batch_id);
 """
+
+# Every column that defines "the same experiment" -- used for duplicate detection.
+SPEC_COLUMNS = [
+    "expression", "region", "universe", "delay", "decay",
+    "neutralization", "truncation", "test_period",
+]
 
 COLUMNS = [
     "alpha_id", "created_at", "expression", "region", "universe", "delay",
@@ -125,6 +153,30 @@ class AlphaStore:
     def count(self) -> int:
         with self._connect() as conn:
             return conn.execute("SELECT COUNT(*) FROM alphas").fetchone()[0]
+
+    def has_simulated(self, spec) -> bool:
+        """Has this exact expression already run with these exact settings?
+
+        Truncation is a REAL, so it is compared with a tolerance rather than for
+        equality -- 0.08 does not necessarily round-trip through SQLite to the
+        same bits it went in as.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT truncation FROM alphas
+                WHERE expression = ? AND region = ? AND universe = ?
+                  AND delay = ? AND decay = ? AND neutralization = ?
+                  AND test_period = ? AND ABS(truncation - ?) < 1e-9
+                LIMIT 1
+                """,
+                (
+                    spec.expression, spec.region, spec.universe, spec.delay,
+                    spec.decay, spec.neutralization, spec.test_period,
+                    spec.truncation,
+                ),
+            ).fetchone()
+        return row is not None
 
     def recent(self, limit: int = 10) -> list[sqlite3.Row]:
         with self._connect() as conn:

@@ -61,9 +61,17 @@ def main() -> int:
         return 1
 
     # Imported after Config() so .env is loaded before ace_lib reads BRAIN_API_URL.
-    from bot import handlers, sim_handlers
+    from bot import (
+        field_handlers,
+        handlers,
+        help_handlers,
+        queue_handlers,
+        sim_handlers,
+    )
     from bot.alpha_spec import SettingsCatalog
     from bot.brain_session import BrainSession
+    from bot.reporting import QueueReporter
+    from bot.simqueue import QueueWorker, SimQueue
     from bot.simulation import SimulationRunner
     from bot.store import AlphaStore
 
@@ -80,15 +88,36 @@ def main() -> int:
         Application.builder()
         .token(config.telegram_bot_token)
         .concurrent_updates(True)
+        .post_init(help_handlers.post_init)
         .build()
     )
     brain = BrainSession(config)
+    store = AlphaStore(config.db_path)
+    queue = SimQueue(store)
+    runner = SimulationRunner(brain, config.max_concurrent_sims)
+
+    # A row still marked `running` means the process died mid-flight. The
+    # simulation may have completed on BRAIN's side, so it is parked as
+    # `interrupted` for an explicit /queue retry rather than re-run silently.
+    interrupted = queue.reset_interrupted()
+    if interrupted:
+        log.warning("%d simulations were interrupted by the last shutdown", interrupted)
+
     app.bot_data["config"] = config
     app.bot_data["brain"] = brain
     app.bot_data["warned"] = False
     app.bot_data["catalog"] = SettingsCatalog()
-    app.bot_data["store"] = AlphaStore(config.db_path)
-    app.bot_data["runner"] = SimulationRunner(brain, config.max_concurrent_sims)
+    app.bot_data["store"] = store
+    app.bot_data["queue"] = queue
+    app.bot_data["runner"] = runner
+    app.bot_data["worker"] = QueueWorker(
+        queue,
+        runner,
+        brain,
+        store,
+        QueueReporter(app.bot, app, queue),
+        bundle_size=config.multi_sim_bundle_size,
+    )
 
     # The /sim conversation deliberately mixes message and callback handlers and
     # edits one settings card in place, so per-message tracking is not wanted.
@@ -97,6 +126,9 @@ def main() -> int:
     )
     handlers.register(app, config)
     sim_handlers.register(app, config)
+    field_handlers.register(app, config)
+    queue_handlers.register(app, config)
+    help_handlers.register(app, config)
 
     log.info(
         "Starting as @%s | BRAIN API: %s | %d authorised chat(s)",

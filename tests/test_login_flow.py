@@ -15,7 +15,13 @@ import pytest
 from bot import brain_session as bs
 from bot import handlers as h
 from bot.brain_session import BrainSession
-from tests.fakes import PERSONA_URL, FakeContext, FakeResponse, FakeSession
+from tests.fakes import (
+    PERSONA_URL,
+    FakeContext,
+    FakeResponse,
+    FakeSession,
+    FakeUpdate,
+)
 
 CHAT_ID = 4242
 
@@ -187,6 +193,51 @@ def test_expiry_job_does_not_cry_wolf_if_session_was_refreshed(monkeypatch, conf
     assert len(context.bot.messages) == before, "session is alive; stay quiet"
     assert brain.is_authenticated
     assert len(context.job_queue.live(h.EXPIRED_JOB)) == 1
+
+
+def test_relogin_button_issues_a_fresh_session(monkeypatch, config):
+    """Regression: this path called _authenticate with a stale extra argument.
+
+    The warning message's Re-login button is only reachable ~4 hours in, so the
+    TypeError went unnoticed until it fired in production.
+    """
+    session = FakeSession([FakeResponse(201), FakeResponse(201)], expiry=14395.0)
+    brain, context = build(monkeypatch, config, session)
+
+    async def scenario():
+        await h._authenticate(context, CHAT_ID)
+        await brain.logout()
+        update = FakeUpdate(CHAT_ID, callback_data=h.CB_RELOGIN)
+        await h.on_button(update, context)
+        return update
+
+    update = asyncio.run(scenario())
+
+    assert brain.is_authenticated, "the button must produce a live session"
+    assert "Logged in to BRAIN" in context.bot.texts()[-1]
+    assert update.callback_query.answers == ["Re-logging in…"]
+    assert len(context.job_queue.live(h.WARNING_JOB)) == 1
+
+
+def test_buttons_refuse_an_unauthorised_chat(monkeypatch, config):
+    session = FakeSession([FakeResponse(201)], expiry=14395.0)
+    brain, context = build(monkeypatch, config, session)
+
+    update = FakeUpdate(999999, callback_data=h.CB_RELOGIN)
+    asyncio.run(h.on_button(update, context))
+
+    assert update.callback_query.answers == ["Not authorised."]
+    assert not brain.is_authenticated
+
+
+def test_persona_button_nudges_the_waiting_login(monkeypatch, config):
+    session = FakeSession([FakeResponse(201)], expiry=14395.0)
+    _brain, context = build(monkeypatch, config, session)
+
+    update = FakeUpdate(CHAT_ID, callback_data=h.CB_PERSONA_DONE)
+    asyncio.run(h.on_button(update, context))
+
+    assert update.callback_query.answers == ["Checking…"]
 
 
 def test_logout_clears_every_timer(monkeypatch, config):

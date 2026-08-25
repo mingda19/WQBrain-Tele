@@ -7,6 +7,7 @@ handling is confined to this module.
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -154,12 +155,96 @@ async def run_simulation(brain, spec: AlphaSpec) -> SimOutcome:
     )
 
 
+async def run_batch(brain, specs: list[AlphaSpec]) -> list[SimOutcome]:
+    """Simulate a bundle of alphas in one multi-simulation.
+
+    Every spec must share region, delay and universe -- see batching.bundle_key.
+    Results come back aligned with ``specs``.
+
+    ``ace.simulate_alpha_list_multi`` is deliberately not used: it runs its own
+    ThreadPool (ace_lib.py:987), which would compound with SimulationRunner's
+    semaphore and push past BRAIN's concurrency ceiling. This drives the single
+    bundle primitive instead and lets the caller meter it.
+    """
+    if not specs:
+        return []
+    if len(specs) == 1:
+        return [await run_simulation(brain, specs[0])]
+
+    simulate_data = [spec.to_simulate_data() for spec in specs]
+
+    try:
+        submitted = await brain.run_ace(ace.simulate_multi_alpha, simulate_data)
+    except TypeError:
+        # ace_lib.py:494 calls len() on `children`, which defaults to the int 0
+        # when the response carries no children key. Losing the bundle to that
+        # would be worse than simulating one at a time.
+        log.warning("Multi-simulation failed internally; falling back to singles")
+        return [await run_simulation(brain, spec) for spec in specs]
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Multi-simulation submission failed")
+        return [
+            SimOutcome(spec=spec, error=f"Could not submit: {exc}") for spec in specs
+        ]
+
+    if len(submitted) != len(specs):
+        log.warning(
+            "Multi-simulation returned %d results for %d alphas; falling back",
+            len(submitted),
+            len(specs),
+        )
+        return [await run_simulation(brain, spec) for spec in specs]
+
+    outcomes = []
+    for spec, result in zip(specs, submitted):
+        alpha_id = (result or {}).get("alpha_id")
+        if not alpha_id:
+            outcomes.append(
+                SimOutcome(
+                    spec=spec,
+                    error=(
+                        "BRAIN rejected this alpha. Usually a syntax error, or a "
+                        "datafield unavailable for this region/delay/universe."
+                    ),
+                )
+            )
+            continue
+        try:
+            stats = await brain.run_ace(
+                ace.get_specified_alpha_stats,
+                alpha_id,
+                result.get("simulate_data", spec.to_simulate_data()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Fetching stats failed for %s", alpha_id)
+            outcomes.append(
+                SimOutcome(
+                    spec=spec,
+                    ok=True,
+                    alpha_id=alpha_id,
+                    error=f"Simulated, but stats could not be read: {exc}",
+                )
+            )
+            continue
+        outcomes.append(
+            SimOutcome(
+                spec=spec,
+                ok=True,
+                alpha_id=alpha_id,
+                metrics=_extract_metrics(stats.get("is_stats")),
+                tests=_extract_tests(stats.get("is_tests")),
+            )
+        )
+    return outcomes
+
+
 class SimulationRunner:
     """Caps how many simulations are in flight at once.
 
     BRAIN allows a limited number of concurrent simulations per account and
     rejects the excess rather than queueing them, so the ceiling is enforced
-    here. The semaphore is also what the batch queue will meter against.
+    here. /sim and the queue worker share this one semaphore rather than each
+    keeping their own, so the account limit holds across both.
     """
 
     def __init__(self, brain, max_concurrent: int) -> None:
@@ -172,10 +257,16 @@ class SimulationRunner:
     def in_flight(self) -> int:
         return self._in_flight
 
-    async def run(self, spec: AlphaSpec) -> SimOutcome:
+    @asynccontextmanager
+    async def slot(self):
+        """Hold one concurrency slot. Used by the queue worker for a whole bundle."""
         async with self._semaphore:
             self._in_flight += 1
             try:
-                return await run_simulation(self._brain, spec)
+                yield
             finally:
                 self._in_flight -= 1
+
+    async def run(self, spec: AlphaSpec) -> SimOutcome:
+        async with self.slot():
+            return await run_simulation(self._brain, spec)

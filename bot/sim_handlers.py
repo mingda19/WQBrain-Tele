@@ -26,7 +26,6 @@ from telegram.ext import (
 )
 
 from bot.alpha_spec import (
-    TEST_PERIOD_CHOICES,
     AlphaSpec,
     SettingsCatalog,
     parse_decay,
@@ -36,6 +35,13 @@ from bot.config import Config
 from bot.formatting import bold, code, esc, pre
 from bot.handlers import persona_prompt
 from bot.results import format_outcome, format_spec_card
+from bot.settings_ui import (
+    CHOICE_LABELS,
+    choice_keyboard,
+    choices_for,
+    edit_hint,
+    settings_keyboard,
+)
 from bot.simulation import MIN_SESSION_SECONDS
 
 log = logging.getLogger(__name__)
@@ -44,15 +50,7 @@ ASK_EXPRESSION, SETTINGS, ASK_VALUE, CONFIRM = range(4)
 
 P = "sim"  # callback prefix; handlers.py owns "persona:" and "session:"
 
-# field -> (button label, catalog lookup)
-CHOICE_FIELDS = {
-    "region": "Region",
-    "universe": "Universe",
-    "delay": "Delay",
-    "neutralization": "Neutral",
-    "test_period": "Period",
-}
-TEXT_FIELDS = {"decay": "Decay", "truncation": "Trunc"}
+CHOICE_FIELDS = CHOICE_LABELS
 
 
 def _brain(context):
@@ -68,68 +66,15 @@ def _spec(context) -> AlphaSpec:
 
 
 def _choices(context, field: str) -> list:
-    catalog = _catalog(context)
-    spec = _spec(context)
-    if field == "region":
-        return catalog.regions()
-    if field == "delay":
-        return catalog.delays(spec.region)
-    if field == "universe":
-        return catalog.universes(spec.region, spec.delay)
-    if field == "neutralization":
-        return catalog.neutralizations(spec.region, spec.delay)
-    if field == "test_period":
-        return list(TEST_PERIOD_CHOICES)
-    return []
+    return choices_for(_catalog(context), _spec(context), field)
 
 
 def _settings_keyboard(spec: AlphaSpec) -> InlineKeyboardMarkup:
-    """Each button shows the value it currently holds."""
-    rows = [
-        [
-            InlineKeyboardButton(f"Region: {spec.region}", callback_data=f"{P}:pick:region"),
-            InlineKeyboardButton(
-                f"Universe: {spec.universe}", callback_data=f"{P}:pick:universe"
-            ),
-        ],
-        [
-            InlineKeyboardButton(f"Delay: {spec.delay}", callback_data=f"{P}:pick:delay"),
-            InlineKeyboardButton(
-                f"Neutral: {spec.neutralization}",
-                callback_data=f"{P}:pick:neutralization",
-            ),
-        ],
-        [
-            InlineKeyboardButton(f"Decay: {spec.decay}", callback_data=f"{P}:edit:decay"),
-            InlineKeyboardButton(
-                f"Trunc: {spec.truncation:g}", callback_data=f"{P}:edit:truncation"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                f"Test period: {spec.test_period}", callback_data=f"{P}:pick:test_period"
-            )
-        ],
-        [
-            InlineKeyboardButton("Run simulation", callback_data=f"{P}:run"),
-            InlineKeyboardButton("Cancel", callback_data=f"{P}:cancel"),
-        ],
-    ]
-    return InlineKeyboardMarkup(rows)
+    return settings_keyboard(spec, P)
 
 
 def _choice_keyboard(field: str, options: list, current) -> InlineKeyboardMarkup:
-    buttons = []
-    for option in options:
-        mark = "• " if str(option) == str(current) else ""
-        buttons.append(
-            InlineKeyboardButton(
-                f"{mark}{option}", callback_data=f"{P}:set:{field}:{option}"
-            )
-        )
-    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
-    rows.append([InlineKeyboardButton("Back", callback_data=f"{P}:menu")])
-    return InlineKeyboardMarkup(rows)
+    return choice_keyboard(field, options, current, P)
 
 
 async def _show_settings(update: Update, context, *, edit: bool) -> int:
@@ -238,12 +183,7 @@ async def sim_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         field = parts[2]
         context.user_data["editing"] = field
         await query.answer()
-        hint = (
-            "Send a decay value (whole number, 0–512):"
-            if field == "decay"
-            else "Send a truncation value (0–1, e.g. 0.08):"
-        )
-        await query.edit_message_text(hint, parse_mode=ParseMode.HTML)
+        await query.edit_message_text(edit_hint(field), parse_mode=ParseMode.HTML)
         return ASK_VALUE
 
     if action == "run":

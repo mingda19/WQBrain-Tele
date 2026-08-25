@@ -2,11 +2,12 @@
 
 Telegram front-end for the WorldQuant BRAIN API.
 
-**Built:** headless authentication, session-expiry alerting, and `/sim` — a guided
-single-alpha simulation with results posted back to the chat and recorded in SQLite.
+**Built:** headless authentication with expiry alerting, `/sim` for one guided alpha,
+`/fields` datafield discovery, and a persistent queue that batches many alphas into
+multi-simulations. Every result is recorded to SQLite.
 
-**Not built yet:** batch/multi-simulation queuing, datafield lookup (`/fields`),
-querying the alpha store, and the orchestration agent.
+**Not built yet:** querying the alpha store from chat (beyond `/alphas` and
+`/export`), and the orchestration agent.
 
 ```
 ACE_API/            WorldQuant's ACE library + tutorial notebook. Vendored; never edited.
@@ -67,6 +68,8 @@ nobody, and every command except `/start` is filtered twice.
 
 | Command | |
 |---|---|
+| `/menu` | Everything this bot can do. |
+| `/help_<name>` | What one command does, in detail. |
 | `/start` | Greet; echo this chat's ID. The only command a stranger can reach. |
 | `/login` | Authenticate, including the biometric flow. |
 | `/status` | Time remaining, expiry, last login. Re-checks against BRAIN. |
@@ -74,8 +77,13 @@ nobody, and every command except `/start` is filtered twice.
 | `/relogin` | Force a fresh session. |
 | `/logout` | Drop the session and clear timers. |
 | `/sim` | Build and run one alpha, guided. |
+| `/fields <query>` | Search datafields, paginated. |
+| `/datasets <query>` | List datasets. |
+| `/batch` | Queue many alphas, with optional parameter sweeps. |
+| `/queue` | Queue state; `/queue cancel`, `/queue retry`. |
 | `/alphas` | The 10 most recently simulated alphas. |
-| `/cancel` | Abandon a `/sim` in progress. |
+| `/export` | CSV of every recorded alpha. |
+| `/cancel` | Abandon a `/sim` or `/batch` in progress. |
 
 ### `/sim`
 
@@ -99,6 +107,137 @@ A simulation blocks for minutes inside ACE's polling loop, so it runs as a
 background task — the chat stays responsive and the result arrives as its own
 message. `BRAIN_MAX_CONCURRENT_SIMS` caps how many run at once; beyond that they
 wait for a slot.
+
+### `/fields` — datafield discovery
+
+```
+/fields sentiment
+/fields news18 type:VECTOR
+/fields dataset:fundamental23 type:MATRIX region:CHN delay:0
+```
+
+Bare text goes to BRAIN's own search; `dataset:`, `type:`, `region:`, `delay:` and
+`universe:` are pulled out as filters. Region, delay and universe also have
+buttons on the results — driven by the same catalog `/sim` uses, so only valid
+combinations appear, and changing region snaps a stranded universe rather than
+silently returning nothing.
+
+Each field has a tap-to-toggle button. **The selection lives outside the page
+state, so it survives paging and further searches** — gather fields from several
+pages, then *Use N selected* to template them. `Select page` / `Clear all` handle
+the bulk cases.
+
+`ace.get_datafields` is *not* used for this. It hardcodes `limit=50&offset=0`
+([ace_lib.py:1285](ACE_API/ace_lib.py#L1285)) and discards the response's `count`,
+so there is no way to reach result 51 or to tell "50 results" from "50 of 800".
+`bot/datafields.py` calls the endpoint directly — still through ACE's session and
+its `_check_rate_limit` throttling. A `type:` filter is applied client-side, which
+makes the total an upper bound; the UI shows `~137` rather than claiming precision
+it doesn't have.
+
+### `/batch` — many alphas at once
+
+Two ways in, one path out:
+
+```
+/fields news18 type:VECTOR → [ Use these 8 fields ]
+  → "Send a template. {f} is the field."
+  ← ts_sum(vec_avg({f}),120)
+  → 8 expressions previewed, 3 flagged as already simulated
+  → settings card → Queue all / Skip duplicates
+
+/batch
+  ← ts_rank(close,20)
+    ts_corr(close,volume,10)
+  → same settings card → queued
+```
+
+If the selected fields are VECTOR and the template has no `vec_` operator, the bot
+says so before you queue. That mistake fails on BRAIN's side, and because a
+template applies to every field at once it costs the whole batch rather than one
+simulation.
+
+#### Parameter sweeps
+
+Every setting on the batch card holds a *list* of values. Pick one value to fix
+it, several to sweep it — there is no separate "which variables are adjustable?"
+step, because a setting is adjustable precisely when it holds more than one value.
+
+```
+Batch — 4 expressions
+
+Region    USA
+Universe  TOP3000
+Delay     1
+Decay     0, 6, 12   (3)
+Neutral   INDUSTRY, SUBINDUSTRY   (2)
+Trunc     0.03
+Period    P1Y
+
+4 expr × 3 × 2 = 24 alphas
+sweeping decay, neutral
+
+[ Region: USA ]      [ Universe: TOP3000 ]
+[ Delay: 1 ]         [ Decay: 3 values ]
+[ Neutral: 2 values ][ Trunc: 0.03 ]
+[ Period: P1Y ]
+[ Queue 24 alphas ]  [ Cancel ]
+```
+
+Enumerated settings open a multi-select picker; decay and truncation take a comma
+list (`0,6,12`). The total is the cross-product of expressions with every swept
+setting and is recomputed on every tap, so a four-way sweep cannot quietly become
+200 simulations — which is also the hard cap.
+
+Sweeping region or delay is allowed and simply produces more bundles, since
+multi-simulation requires those to match within a bundle.
+
+Duplicates are detected on expression **and** every settings column, so the same
+expression at a different decay is correctly a new experiment.
+
+### Finding your way around
+
+`/menu` lists everything, grouped. `/help_fields`, `/help_batch`, … explain one
+command in depth; `/help` on its own lists the topics.
+
+Telegram's command grammar is `/[a-zA-Z0-9_]+`, so `/help-fields` arrives as
+`/help` with a dangling `-fields` and BotFather rejects hyphens in the autocomplete
+menu. The underscore form is therefore the real command, but `/help fields` and
+`/help-fields` are both accepted too, and a prefix like `/help que` resolves.
+
+### The queue
+
+Queued alphas live in `data/alphas.db` beside the results, so a batch survives a
+restart or a closed lid. A worker drains it one bundle at a time:
+
+```
+queued ──► running ──► done
+               │  └──► failed
+               └─────► interrupted   (process died mid-flight)
+```
+
+Bundles never mix region, delay or universe — multi-simulation requires them to
+match (notebook cell 42) — and are capped at BRAIN's limit of 10. `/sim` and the
+queue share one concurrency semaphore, so `BRAIN_MAX_CONCURRENT_SIMS` holds across
+both rather than each keeping its own budget.
+
+The worker re-checks the session **before every bundle**, not once per batch: forty
+alphas outlive a four-hour session, and ACE's own refresh is disarmed.
+
+A row still `running` at startup means the process died after submitting. It is
+parked as `interrupted` rather than retried, because the simulation may well have
+completed on BRAIN's side — `/queue retry` requeues those deliberately.
+
+Reporting is deliberately quiet: a running tally per bundle, a full report only for
+alphas that pass every check, and everything else in the store behind `/alphas` and
+`/export`.
+
+`ace.simulate_alpha_list_multi` is not used — it runs its own `ThreadPool`
+([ace_lib.py:987](ACE_API/ace_lib.py#L987)), which would compound with the
+semaphore and push past the account limit. `run_batch` drives the single-bundle
+primitive instead, with a fallback to individual simulations when ACE's
+`multisimulation_progress` hits its `len(int)` bug
+([ace_lib.py:494](ACE_API/ace_lib.py#L494)).
 
 ### The alpha store
 
@@ -135,12 +274,14 @@ against the truth, so closing your laptop for an hour does not lose the warning.
 python -m pytest tests/ -q
 ```
 
-68 tests, no network and no credentials required. They cover the paths that are
+194 tests, no network and no credentials required. They cover the paths that are
 impractical to check by hand: a rejected password, the biometric poll, a
-server-side session kill, timer re-arming after a sleep, and the concurrency
-ceiling. The result-extraction fixtures reproduce the exact DataFrame shapes
-saved in `ACE_API/how_to_use.ipynb` (cells 54 and 56), so parsing is tested
-against what BRAIN really returns.
+server-side session kill, timer re-arming after a sleep, the concurrency ceiling,
+a process dying mid-batch, a session expiring halfway through a queue, and a
+field selection surviving a page change. The
+result-extraction fixtures reproduce the exact DataFrame shapes saved in
+`ACE_API/how_to_use.ipynb` (cells 54 and 56), so parsing is tested against what
+BRAIN really returns.
 
 ## Verifying against the real thing
 
@@ -157,6 +298,13 @@ against what BRAIN really returns.
 - **First simulation** — `/sim`, send a simple expression such as
   `ts_rank(close, 20)`, accept the defaults, Confirm & run. Expect a results
   message in a few minutes, then `/alphas` to confirm it was recorded.
+- **Datafield search** — `/fields news18 type:VECTOR`; check Prev/Next paging and
+  that the count looks plausible against Data Explorer.
+- **First batch** — from that page, *Use these N fields*, template
+  `ts_sum(vec_avg({f}),120)`, queue it, then `/queue` for progress.
+- **Duplicate detection** — queue the same batch again; expect every alpha flagged.
+- **Restart resilience** — restart the bot mid-batch. Expect `running` rows to
+  become `interrupted`, and `/queue retry` to drain them.
 
 ## Notes
 
