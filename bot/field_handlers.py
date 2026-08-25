@@ -343,20 +343,23 @@ async def _send_csv(update: Update, context) -> None:
         await context.bot.send_message(chat_id=chat_id, text="Nothing to export.")
         return
 
-    path = Path(tempfile.gettempdir()) / "datafields.csv"
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    fd, path_str = tempfile.mkstemp(suffix=".csv", prefix="datafields_")
+    path = Path(path_str)
+    try:
+        with open(fd, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
 
-    with open(path, "rb") as handle:
-        await context.bot.send_document(
-            chat_id=chat_id,
-            document=handle,
-            filename="datafields.csv",
-            caption=f"{len(rows):,} datafields · {state['query'].context_line}",
-        )
-    path.unlink(missing_ok=True)
+        with open(path, "rb") as handle:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=handle,
+                filename="datafields.csv",
+                caption=f"{len(rows):,} datafields · {state['query'].context_line}",
+            )
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def register(app: Application, config: Config) -> None:

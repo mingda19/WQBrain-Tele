@@ -147,6 +147,7 @@ async def _session_expired(context: ContextTypes.DEFAULT_TYPE) -> None:
             already_warned=context.application.bot_data.get("warned", False),
         )
         return
+    await _set_worker(context, running=False)
     await context.bot.send_message(
         chat_id=context.job.chat_id,
         text=f"{bold('BRAIN session expired.')} Send /login to start a new one.",
@@ -169,6 +170,7 @@ async def _reconcile_session(context: ContextTypes.DEFAULT_TYPE) -> None:
     remaining = await brain.refresh_expiry()
     if remaining <= 0:
         _cancel_jobs(context, WARNING_JOB, EXPIRED_JOB)
+        await _set_worker(context, running=False)
         await context.bot.send_message(
             chat_id=context.job.chat_id,
             text=(

@@ -232,7 +232,7 @@ def test_buttons_refuse_an_unauthorised_chat(monkeypatch, config):
 
 def test_persona_button_nudges_the_waiting_login(monkeypatch, config):
     session = FakeSession([FakeResponse(201)], expiry=14395.0)
-    brain, context = build(monkeypatch, config, session)
+    _brain, context = build(monkeypatch, config, session)
 
     update = FakeUpdate(CHAT_ID, callback_data=h.CB_PERSONA_DONE)
     asyncio.run(h.on_button(update, context))

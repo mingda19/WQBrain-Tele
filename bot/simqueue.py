@@ -254,6 +254,7 @@ class QueueWorker:
 
     async def _loop(self) -> None:
         while True:
+            bundle = None
             try:
                 bundle = await asyncio.to_thread(
                     self._queue.claim_next_bundle, self._bundle_size
@@ -270,6 +271,11 @@ class QueueWorker:
                 raise
             except Exception:  # noqa: BLE001 -- the worker must never die
                 log.exception("Queue worker iteration failed")
+                if bundle:
+                    for row in bundle:
+                        await asyncio.to_thread(
+                            self._queue.finish, row["id"], error="bundle processing failed"
+                        )
                 await asyncio.sleep(5)
 
     async def _run_bundle(self, rows: list[sqlite3.Row]) -> None:

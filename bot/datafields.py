@@ -162,14 +162,14 @@ def search_all_datafields(
     collected: list[dict] = []
     offset = 0
     while len(collected) < max_rows:
-        rows, total, _ = search_datafields(
+        rows, total, exact = search_datafields(
             session, query, limit=page_size, offset=offset
         )
-        if not rows and offset >= total:
+        if not rows:
             break
         collected.extend(rows)
         offset += page_size
-        if offset >= total:
+        if exact and offset >= total:
             break
     return collected[:max_rows]
 
