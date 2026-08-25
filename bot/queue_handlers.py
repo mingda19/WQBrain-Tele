@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from bot.alpha_spec import AlphaSpec, parse_decay, parse_truncation
+from bot.alpha_spec import TEST_PERIOD_CHOICES
 from bot.batching import (
     FIELD_TOKEN,
     TemplateError,
@@ -29,18 +29,19 @@ from bot.batching import (
     find_duplicates,
     group_into_bundles,
     parse_expression_list,
-    specs_from_expressions,
     vector_warning,
 )
 from bot.config import Config
 from bot.formatting import bold, code, esc, pre
-from bot.results import format_spec_card
-from bot.settings_ui import (
-    CHOICE_LABELS,
-    choice_keyboard,
-    choices_for,
-    edit_hint,
-    settings_keyboard,
+from bot.results import format_sweep_card
+from bot.settings_ui import multi_choice_keyboard, sweep_edit_hint, sweep_keyboard
+from bot.sweep import (
+    LABELS,
+    NUMERIC,
+    SweepError,
+    SweepSettings,
+    format_values,
+    parse_number_list,
 )
 from bot.simqueue import (
     CANCELLED,
@@ -86,8 +87,8 @@ def _draft(context) -> dict:
     return context.user_data.setdefault("batch", {})
 
 
-def _spec(context) -> AlphaSpec:
-    return _draft(context)["spec"]
+def _sweep(context) -> SweepSettings:
+    return _draft(context)["sweep"]
 
 
 # ------------------------------------------------------------------- entries
@@ -116,9 +117,10 @@ async def from_fields(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     state that waits for the template.
     """
     query = update.callback_query
-    rows = (context.user_data.get("fields") or {}).get("rows") or []
+    # The selection is kept outside the page state, so it spans pages and searches.
+    rows = list((context.user_data.get("field_selection") or {}).values())
     if not rows:
-        await query.answer("That search expired. Send /fields again.", show_alert=True)
+        await query.answer("Nothing selected. Tap some fields first.", show_alert=True)
         return ConversationHandler.END
 
     await query.answer()
@@ -178,16 +180,15 @@ async def got_expressions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def _show_settings(update: Update, context, *, edit: bool) -> int:
     draft = _draft(context)
-    draft.setdefault("spec", AlphaSpec())
-    spec = _catalog(context).reconcile(draft["spec"])
-    draft["spec"] = spec
+    sweep = draft.setdefault("sweep", SweepSettings())
+    sweep.reconcile(_catalog(context))
 
-    count = len(draft["expressions"])
-    card = format_spec_card(
-        spec, title=f"Batch settings — {count} alphas", show_expression=False
+    expressions = draft["expressions"]
+    total = sweep.total(len(expressions))
+    text = format_sweep_card(
+        sweep, expressions, title=f"Batch — {len(expressions)} expressions"
     )
-    text = f"{card}\n\n{_preview(draft['expressions'])}"
-    markup = settings_keyboard(spec, P, run_label=f"Queue {count} alphas")
+    markup = sweep_keyboard(sweep, P, run_label=f"Queue {total} alphas")
 
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(
@@ -199,14 +200,6 @@ async def _show_settings(update: Update, context, *, edit: bool) -> int:
             parse_mode=ParseMode.HTML, reply_markup=markup,
         )
     return SETTINGS
-
-
-def _preview(expressions: list[str]) -> str:
-    shown = expressions[:PREVIEW_LIMIT]
-    body = "\n".join(shown)
-    if len(expressions) > PREVIEW_LIMIT:
-        body += f"\n… and {len(expressions) - PREVIEW_LIMIT} more"
-    return pre(body)
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -231,29 +224,28 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if action == "pick":
         field = parts[2]
         await query.answer()
-        options = choices_for(_catalog(context), _spec(context), field)
-        await query.edit_message_text(
-            f"{bold(CHOICE_LABELS.get(field, field))} — choose one:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=choice_keyboard(
-                field, options, getattr(_spec(context), field), P
-            ),
-        )
-        return SETTINGS
+        return await _show_choices(update, context, field)
 
-    if action == "set":
+    if action == "tog":
         field, raw = parts[2], parts[3]
-        spec = _spec(context)
-        setattr(spec, field, int(raw) if field == "delay" else raw)
-        _draft(context)["spec"] = _catalog(context).reconcile(spec)
-        await query.answer(f"{field} = {raw}")
-        return await _show_settings(update, context, edit=True)
+        sweep = _sweep(context)
+        try:
+            sweep.toggle(field, raw)
+        except SweepError as exc:
+            await query.answer(str(exc), show_alert=True)
+            return SETTINGS
+        await query.answer(f"{LABELS[field]}: {len(sweep.values(field))} selected")
+        return await _show_choices(update, context, field)
 
     if action == "edit":
         field = parts[2]
         _draft(context)["editing"] = field
         await query.answer()
-        await query.edit_message_text(edit_hint(field), parse_mode=ParseMode.HTML)
+        await query.edit_message_text(
+            f"{bold(LABELS[field])}\n{esc(sweep_edit_hint(field))}\n\n"
+            f"Currently: {code(format_values(field, _sweep(context).values(field)))}",
+            parse_mode=ParseMode.HTML,
+        )
         return ASK_VALUE
 
     if action == "run":
@@ -268,23 +260,69 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return SETTINGS
 
 
+async def _show_choices(update: Update, context, field: str) -> int:
+    """Multi-select picker. Several values selected means the setting sweeps."""
+    sweep = _sweep(context)
+    options = _options_for(context, field)
+    selected = sweep.values(field)
+
+    hint = (
+        "one value fixes it, several sweep it"
+        if len(selected) == 1
+        else f"sweeping {len(selected)} values"
+    )
+    await update.callback_query.edit_message_text(
+        f"{bold(LABELS[field])} — tap to toggle\n{esc(hint)}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=multi_choice_keyboard(field, options, selected, P),
+    )
+    return SETTINGS
+
+
+def _options_for(context, field: str) -> list:
+    """Union of what every currently-selected region/delay allows.
+
+    A region sweep widens the options rather than picking one region's list --
+    ``SweepSettings.reconcile`` then drops anything that survives here but is not
+    valid for the final combination.
+    """
+    catalog = _catalog(context)
+    sweep = _sweep(context)
+
+    if field == "region":
+        return catalog.regions()
+    if field == "test_period":
+        return list(TEST_PERIOD_CHOICES)
+    if field == "delay":
+        return sorted({d for r in sweep.values("region") for d in catalog.delays(r)})
+
+    lookup = catalog.universes if field == "universe" else catalog.neutralizations
+    return sorted(
+        {
+            value
+            for r in sweep.values("region")
+            for d in sweep.values("delay")
+            for value in lookup(r, d)
+        }
+    )
+
+
 async def got_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     draft = _draft(context)
     field = draft.get("editing")
-    if field not in ("decay", "truncation") or "expressions" not in draft:
+    if field not in NUMERIC or "expressions" not in draft:
         await update.effective_message.reply_text(
             "That edit expired. Send /batch to start again."
         )
         return ConversationHandler.END
 
-    parser = parse_decay if field == "decay" else parse_truncation
     try:
-        value = parser(update.effective_message.text or "")
-    except ValueError as exc:
+        values = parse_number_list(field, update.effective_message.text or "")
+        draft["sweep"].set_values(field, values)
+    except SweepError as exc:
         await update.effective_message.reply_text(str(exc))
         return ASK_VALUE
 
-    setattr(draft["spec"], field, value)
     draft.pop("editing", None)
     return await _show_settings(update, context, edit=False)
 
@@ -294,7 +332,13 @@ async def got_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def _show_confirm(update: Update, context) -> int:
     draft = _draft(context)
-    specs = specs_from_expressions(draft["expressions"], draft["spec"])
+    sweep = draft["sweep"]
+
+    try:
+        specs = sweep.expand(draft["expressions"])
+    except SweepError as exc:
+        await update.callback_query.answer(str(exc), show_alert=True)
+        return SETTINGS
     draft["specs"] = specs
 
     duplicates = await _find_duplicates(context, specs)
@@ -306,8 +350,17 @@ async def _show_confirm(update: Update, context) -> int:
         "",
         f"{len(specs)} alphas · {len(bundles)} multi-sim bundle"
         f"{'s' if len(bundles) != 1 else ''}",
-        esc(draft["spec"].settings_line()),
+        esc(sweep.summary(len(draft["expressions"]))),
     ]
+    swept = sweep.swept()
+    if swept:
+        lines.append(
+            esc(
+                " · ".join(
+                    f"{LABELS[n]} {format_values(n, sweep.values(n))}" for n in swept
+                )
+            )
+        )
 
     buttons = []
     if duplicates:
@@ -378,8 +431,8 @@ async def _enqueue(update: Update, context, *, skip_duplicates: bool) -> int:
 
     await update.callback_query.edit_message_text(
         f"{bold(f'Queued {len(specs)} alphas')}  ·  batch {code(batch_id)}\n"
-        f"{len(bundles)} bundle{'s' if len(bundles) != 1 else ''} · "
-        f"{esc(draft['spec'].settings_line())}{esc(note)}\n\n"
+        f"{len(bundles)} bundle{'s' if len(bundles) != 1 else ''}"
+        f"{esc(note)}\n\n"
         "Results as they finish. /queue for progress.",
         parse_mode=ParseMode.HTML,
     )

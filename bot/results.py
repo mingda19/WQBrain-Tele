@@ -135,7 +135,8 @@ def _stats_line(row: dict) -> str:
 
 
 def format_field_page(
-    rows: list[dict], query, *, offset: int, total: int, exact: bool
+    rows: list[dict], query, *, offset: int, total: int, exact: bool,
+    selected: set | None = None,
 ) -> str:
     """One page of datafield cards.
 
@@ -149,16 +150,20 @@ def format_field_page(
             "Try a broader term, or check the region/delay/universe."
         )
 
+    selected = selected or set()
     shown = f"{offset + 1}–{offset + len(rows)}"
     count = f"{total:,}" if exact else f"~{total:,}"
     header = (
         f"{bold('Datafields')} — {esc(query.describe())}\n"
         f"{esc(shown)} of {esc(count)} · {esc(query.context_line)}"
     )
+    if selected:
+        header += f"\n{bold(f'{len(selected)} selected')}"
 
     cards = []
     for row in rows:
-        block = [f"{code(row['id'])}   {esc(row['type'])}"]
+        mark = "☑ " if row["id"] in selected else ""
+        block = [f"{esc(mark)}{code(row['id'])}   {esc(row['type'])}"]
         if row["description"]:
             block.append(f"  {esc(_truncate(row['description'], 62))}")
         stats = _stats_line(row)
@@ -199,6 +204,41 @@ def format_dataset_page(
             f"  {esc(' · '.join(bits))}"
         )
     return header + "\n\n" + "\n\n".join(cards)
+
+
+def format_sweep_card(sweep, expressions: list[str], *, title: str) -> str:
+    """Batch settings card: every setting with its value(s), plus the total.
+
+    Swept settings are marked with their count so the cross-product is never a
+    surprise -- the total line is the thing that stops a four-way sweep from
+    quietly becoming 200 simulations.
+    """
+    from bot.sweep import LABELS, SWEEPABLE, format_values
+
+    # The table goes in <pre>: Telegram renders <b> in a proportional font, so
+    # space-padded columns only line up inside a monospace block.
+    table = []
+    for name in SWEEPABLE:
+        values = sweep.values(name)
+        rendered = format_values(name, values)
+        marker = f"   ({len(values)})" if len(values) > 1 else ""
+        table.append(f"{LABELS[name]:<10}{rendered}{marker}")
+
+    parts = [bold(title), pre("\n".join(table)), bold(sweep.summary(len(expressions)))]
+
+    swept = sweep.swept()
+    if swept:
+        parts.append(esc(f"sweeping {', '.join(LABELS[n].lower() for n in swept)}"))
+
+    return "\n".join(parts) + "\n\n" + _expression_preview(expressions)
+
+
+def _expression_preview(expressions: list[str], limit: int = 5) -> str:
+    shown = expressions[:limit]
+    body = "\n".join(shown)
+    if len(expressions) > limit:
+        body += f"\n… and {len(expressions) - limit} more"
+    return pre(body)
 
 
 def format_spec_card(spec, *, title: str, show_expression: bool = True) -> str:

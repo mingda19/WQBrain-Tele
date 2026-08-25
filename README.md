@@ -68,6 +68,8 @@ nobody, and every command except `/start` is filtered twice.
 
 | Command | |
 |---|---|
+| `/menu` | Everything this bot can do. |
+| `/help_<name>` | What one command does, in detail. |
 | `/start` | Greet; echo this chat's ID. The only command a stranger can reach. |
 | `/login` | Authenticate, including the biometric flow. |
 | `/status` | Time remaining, expiry, last login. Re-checks against BRAIN. |
@@ -77,7 +79,7 @@ nobody, and every command except `/start` is filtered twice.
 | `/sim` | Build and run one alpha, guided. |
 | `/fields <query>` | Search datafields, paginated. |
 | `/datasets <query>` | List datasets. |
-| `/batch` | Queue many alphas from pasted expressions. |
+| `/batch` | Queue many alphas, with optional parameter sweeps. |
 | `/queue` | Queue state; `/queue cancel`, `/queue retry`. |
 | `/alphas` | The 10 most recently simulated alphas. |
 | `/export` | CSV of every recorded alpha. |
@@ -115,9 +117,15 @@ wait for a slot.
 ```
 
 Bare text goes to BRAIN's own search; `dataset:`, `type:`, `region:`, `delay:` and
-`universe:` are pulled out as filters. Results come back as cards — id, type,
-description, coverage and usage — eight per page with Prev/Next and an Export CSV
-button.
+`universe:` are pulled out as filters. Region, delay and universe also have
+buttons on the results — driven by the same catalog `/sim` uses, so only valid
+combinations appear, and changing region snaps a stranded universe rather than
+silently returning nothing.
+
+Each field has a tap-to-toggle button. **The selection lives outside the page
+state, so it survives paging and further searches** — gather fields from several
+pages, then *Use N selected* to template them. `Select page` / `Clear all` handle
+the bulk cases.
 
 `ace.get_datafields` is *not* used for this. It hardcodes `limit=50&offset=0`
 ([ace_lib.py:1285](ACE_API/ace_lib.py#L1285)) and discards the response's `count`,
@@ -149,8 +157,53 @@ says so before you queue. That mistake fails on BRAIN's side, and because a
 template applies to every field at once it costs the whole batch rather than one
 simulation.
 
+#### Parameter sweeps
+
+Every setting on the batch card holds a *list* of values. Pick one value to fix
+it, several to sweep it — there is no separate "which variables are adjustable?"
+step, because a setting is adjustable precisely when it holds more than one value.
+
+```
+Batch — 4 expressions
+
+Region    USA
+Universe  TOP3000
+Delay     1
+Decay     0, 6, 12   (3)
+Neutral   INDUSTRY, SUBINDUSTRY   (2)
+Trunc     0.03
+Period    P1Y
+
+4 expr × 3 × 2 = 24 alphas
+sweeping decay, neutral
+
+[ Region: USA ]      [ Universe: TOP3000 ]
+[ Delay: 1 ]         [ Decay: 3 values ]
+[ Neutral: 2 values ][ Trunc: 0.03 ]
+[ Period: P1Y ]
+[ Queue 24 alphas ]  [ Cancel ]
+```
+
+Enumerated settings open a multi-select picker; decay and truncation take a comma
+list (`0,6,12`). The total is the cross-product of expressions with every swept
+setting and is recomputed on every tap, so a four-way sweep cannot quietly become
+200 simulations — which is also the hard cap.
+
+Sweeping region or delay is allowed and simply produces more bundles, since
+multi-simulation requires those to match within a bundle.
+
 Duplicates are detected on expression **and** every settings column, so the same
 expression at a different decay is correctly a new experiment.
+
+### Finding your way around
+
+`/menu` lists everything, grouped. `/help_fields`, `/help_batch`, … explain one
+command in depth; `/help` on its own lists the topics.
+
+Telegram's command grammar is `/[a-zA-Z0-9_]+`, so `/help-fields` arrives as
+`/help` with a dangling `-fields` and BotFather rejects hyphens in the autocomplete
+menu. The underscore form is therefore the real command, but `/help fields` and
+`/help-fields` are both accepted too, and a prefix like `/help que` resolves.
 
 ### The queue
 
@@ -221,10 +274,11 @@ against the truth, so closing your laptop for an hour does not lose the warning.
 python -m pytest tests/ -q
 ```
 
-134 tests, no network and no credentials required. They cover the paths that are
+194 tests, no network and no credentials required. They cover the paths that are
 impractical to check by hand: a rejected password, the biometric poll, a
 server-side session kill, timer re-arming after a sleep, the concurrency ceiling,
-a process dying mid-batch, and a session expiring halfway through a queue. The
+a process dying mid-batch, a session expiring halfway through a queue, and a
+field selection surviving a page change. The
 result-extraction fixtures reproduce the exact DataFrame shapes saved in
 `ACE_API/how_to_use.ipynb` (cells 54 and 56), so parsing is tested against what
 BRAIN really returns.

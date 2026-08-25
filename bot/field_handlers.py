@@ -16,7 +16,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, filt
 
 from bot.config import Config
 from bot.datafields import parse_query, search_all_datafields, search_datafields, search_datasets
-from bot.formatting import bold, pre
+from bot.formatting import bold, esc, pre
 from bot.results import format_dataset_page, format_field_page
 
 log = logging.getLogger(__name__)
@@ -35,8 +35,58 @@ def _state(context) -> dict:
     return context.user_data.setdefault("fields", {})
 
 
-def _keyboard(context, *, offset: int, page_size: int, total: int, count: int):
+def _selection(context) -> dict:
+    """Chosen field id -> its row.
+
+    Kept outside the page state so it survives paging: you can gather fields from
+    several pages, or several searches, before queueing them.
+    """
+    return context.user_data.setdefault("field_selection", {})
+
+
+def _keyboard(context, rows_on_page: list[dict], *, offset: int, page_size: int, total: int):
     state = _state(context)
+    query = state["query"]
+    selected = _selection(context)
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{'☑' if row['id'] in selected else '☐'} {row['id']}",
+                callback_data=f"{P}:tog:{row['id']}",
+            )
+        ]
+        for row in rows_on_page
+    ]
+
+    if rows_on_page:
+        page_ids = {r["id"] for r in rows_on_page}
+        all_on_page = page_ids <= set(selected)
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "Clear page" if all_on_page else "Select page",
+                    callback_data=f"{P}:{'clearpage' if all_on_page else 'selpage'}",
+                ),
+                InlineKeyboardButton("Clear all", callback_data=f"{P}:clear"),
+            ]
+        )
+
+    # Market context -- the same catalog /sim uses, so only valid combinations.
+    keyboard.append(
+        [
+            InlineKeyboardButton(f"Region: {query.region}", callback_data=f"{P}:ctx:region"),
+            InlineKeyboardButton(f"Delay: {query.delay}", callback_data=f"{P}:ctx:delay"),
+        ]
+    )
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                f"Universe: {query.universe}", callback_data=f"{P}:ctx:universe"
+            )
+        ]
+    )
+
     nav = []
     if offset > 0:
         nav.append(
@@ -47,18 +97,20 @@ def _keyboard(context, *, offset: int, page_size: int, total: int, count: int):
     nav.append(InlineKeyboardButton(f"{page_no} / {pages}", callback_data=f"{P}:noop"))
     if offset + page_size < total:
         nav.append(InlineKeyboardButton("▶", callback_data=f"{P}:page:{offset + page_size}"))
+    if len(nav) > 1:
+        keyboard.append(nav)
 
-    rows = [nav] if len(nav) > 1 else []
-    if state.get("kind") == "fields" and count:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"Use these {count} fields", callback_data=f"{P}:use"
-                ),
-                InlineKeyboardButton("Export CSV", callback_data=f"{P}:csv"),
-            ]
+    action = [InlineKeyboardButton("Export CSV", callback_data=f"{P}:csv")]
+    if selected:
+        action.insert(
+            0,
+            InlineKeyboardButton(
+                f"Use {len(selected)} selected", callback_data=f"{P}:use"
+            ),
         )
-    return InlineKeyboardMarkup(rows) if rows else None
+    keyboard.append(action)
+
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def _render_fields(update, context, *, offset: int, edit: bool) -> None:
@@ -84,9 +136,12 @@ async def _render_fields(update, context, *, offset: int, edit: bool) -> None:
 
     state.update(offset=offset, total=total, ids=[r["id"] for r in rows], rows=rows)
 
-    text = format_field_page(rows, query, offset=offset, total=total, exact=exact)
+    text = format_field_page(
+        rows, query, offset=offset, total=total, exact=exact,
+        selected=set(_selection(context)),
+    )
     markup = _keyboard(
-        context, offset=offset, page_size=page_size, total=total, count=len(rows)
+        context, rows, offset=offset, page_size=page_size, total=total
     )
 
     if edit and update.callback_query:
@@ -146,7 +201,9 @@ async def datasets(update: Update, context) -> None:
 
 async def on_button(update: Update, context) -> None:
     query_cb = update.callback_query
-    action = query_cb.data.split(":", 2)[1]
+    parts = query_cb.data.split(":", 2)
+    action = parts[1]
+    argument = parts[2] if len(parts) > 2 else ""
     state = _state(context)
 
     if action == "noop":
@@ -158,9 +215,48 @@ async def on_button(update: Update, context) -> None:
         return
 
     if action == "page":
-        offset = int(query_cb.data.split(":", 2)[2])
         await query_cb.answer()
-        await _render_fields(update, context, offset=offset, edit=True)
+        await _render_fields(update, context, offset=int(argument), edit=True)
+        return
+
+    if action == "tog":
+        selected = _selection(context)
+        if argument in selected:
+            del selected[argument]
+        else:
+            row = next((r for r in state.get("rows", []) if r["id"] == argument), None)
+            if row:
+                selected[argument] = row
+        await query_cb.answer(f"{len(selected)} selected")
+        await _render_fields(update, context, offset=state["offset"], edit=True)
+        return
+
+    if action in ("selpage", "clearpage", "clear"):
+        selected = _selection(context)
+        if action == "clear":
+            selected.clear()
+        elif action == "selpage":
+            selected.update({r["id"]: r for r in state.get("rows", [])})
+        else:
+            for row in state.get("rows", []):
+                selected.pop(row["id"], None)
+        await query_cb.answer(f"{len(selected)} selected")
+        await _render_fields(update, context, offset=state["offset"], edit=True)
+        return
+
+    if action == "ctx":
+        await query_cb.answer()
+        await _show_context_choices(update, context, argument)
+        return
+
+    if action == "setctx":
+        name, value = argument.split(":", 1)
+        query = state["query"]
+        setattr(query, name, int(value) if name == "delay" else value)
+        _snap_context(context)
+        await query_cb.answer(f"{name} = {getattr(query, name)}")
+        # A different market means different fields, so start from page one.
+        await _render_fields(update, context, offset=0, edit=True)
         return
 
     if action == "csv":
@@ -169,6 +265,61 @@ async def on_button(update: Update, context) -> None:
         return
 
     await query_cb.answer()
+
+
+def _catalog(context):
+    return context.application.bot_data["catalog"]
+
+
+def _snap_context(context) -> None:
+    """Pull universe and delay back to something the chosen region offers.
+
+    Changing region can strand a universe that only the previous region had, and
+    BRAIN would return an empty result rather than an error.
+    """
+    catalog = _catalog(context)
+    if not catalog.loaded:
+        return
+    query = _state(context)["query"]
+
+    delays = catalog.delays(query.region)
+    if query.delay not in delays:
+        query.delay = delays[0]
+
+    universes = catalog.universes(query.region, query.delay)
+    if universes and query.universe not in universes:
+        query.universe = universes[0]
+
+
+async def _show_context_choices(update: Update, context, name: str) -> None:
+    catalog = _catalog(context)
+    query = _state(context)["query"]
+
+    if name == "region":
+        options = catalog.regions()
+    elif name == "delay":
+        options = catalog.delays(query.region)
+    else:
+        options = catalog.universes(query.region, query.delay)
+
+    buttons = [
+        InlineKeyboardButton(
+            f"{'• ' if str(option) == str(getattr(query, name)) else ''}{option}",
+            callback_data=f"{P}:setctx:{name}:{option}",
+        )
+        for option in options
+    ]
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    rows.append(
+        [InlineKeyboardButton("Back", callback_data=f"{P}:page:{_state(context)['offset']}")]
+    )
+
+    await update.callback_query.edit_message_text(
+        f"{bold(name.title())} — choose one\n"
+        f"{esc('changing this re-runs the search')}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 async def _send_csv(update: Update, context) -> None:
@@ -215,4 +366,9 @@ def register(app: Application, config: Config) -> None:
     # "fld:use" is deliberately excluded: it is an entry point of the /batch
     # ConversationHandler, which is the only thing that can move the chat into a
     # state waiting for a template.
-    app.add_handler(CallbackQueryHandler(on_button, pattern=rf"^{P}:(page|csv|noop)"))
+    app.add_handler(
+        CallbackQueryHandler(
+            on_button,
+            pattern=rf"^{P}:(page|csv|noop|tog|selpage|clearpage|clear|ctx|setctx)",
+        )
+    )
