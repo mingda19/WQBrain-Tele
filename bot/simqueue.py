@@ -254,6 +254,7 @@ class QueueWorker:
 
     async def _loop(self) -> None:
         while True:
+            bundle = None
             try:
                 bundle = await asyncio.to_thread(
                     self._queue.claim_next_bundle, self._bundle_size
@@ -269,6 +270,11 @@ class QueueWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 -- the worker must never die
+                if bundle:
+                    for row in bundle:
+                        await asyncio.to_thread(
+                            self._queue.finish, row["id"], error="worker error"
+                        )
                 log.exception("Queue worker iteration failed")
                 await asyncio.sleep(5)
 
