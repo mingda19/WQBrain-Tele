@@ -98,3 +98,58 @@ def edit_hint(field: str) -> str:
     if field == "decay":
         return "Send a decay value (whole number, 0–512):"
     return "Send a truncation value (0–1, e.g. 0.08):"
+
+
+# --------------------------------------------------------------------- sweeps
+
+
+def sweep_keyboard(sweep, prefix: str, *, run_label: str) -> InlineKeyboardMarkup:
+    """Settings card for a batch. Each button shows fixed value or value count."""
+    from bot.sweep import ENUMERATED, SWEEPABLE, button_label
+
+    buttons = [
+        InlineKeyboardButton(
+            button_label(name, sweep.values(name)),
+            callback_data=f"{prefix}:{'pick' if name in ENUMERATED else 'edit'}:{name}",
+        )
+        for name in SWEEPABLE
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(
+        [
+            InlineKeyboardButton(run_label, callback_data=f"{prefix}:run"),
+            InlineKeyboardButton("Cancel", callback_data=f"{prefix}:cancel"),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def multi_choice_keyboard(
+    field: str, options: list, selected: list, prefix: str
+) -> InlineKeyboardMarkup:
+    """Tap to toggle. Selecting more than one value makes the setting sweep."""
+    chosen = {str(v) for v in selected}
+    buttons = [
+        InlineKeyboardButton(
+            f"{'✓ ' if str(option) in chosen else ''}{option}",
+            callback_data=f"{prefix}:tog:{field}:{option}",
+        )
+        for option in options
+    ]
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton("Done", callback_data=f"{prefix}:menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def sweep_edit_hint(field: str) -> str:
+    if field == "decay":
+        return (
+            "Send one or more decay values, comma separated.\n"
+            "One value fixes it; several sweep it.\n"
+            "For example: 0,6,12"
+        )
+    return (
+        "Send one or more truncation values, comma separated.\n"
+        "One value fixes it; several sweep it.\n"
+        "For example: 0.02,0.05,0.08"
+    )

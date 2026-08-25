@@ -61,7 +61,13 @@ def main() -> int:
         return 1
 
     # Imported after Config() so .env is loaded before ace_lib reads BRAIN_API_URL.
-    from bot import field_handlers, handlers, queue_handlers, sim_handlers
+    from bot import (
+        field_handlers,
+        handlers,
+        help_handlers,
+        queue_handlers,
+        sim_handlers,
+    )
     from bot.alpha_spec import SettingsCatalog
     from bot.brain_session import BrainSession
     from bot.reporting import QueueReporter
@@ -82,6 +88,7 @@ def main() -> int:
         Application.builder()
         .token(config.telegram_bot_token)
         .concurrent_updates(True)
+        .post_init(help_handlers.post_init)
         .build()
     )
     brain = BrainSession(config)
@@ -121,6 +128,7 @@ def main() -> int:
     sim_handlers.register(app, config)
     field_handlers.register(app, config)
     queue_handlers.register(app, config)
+    help_handlers.register(app, config)
 
     log.info(
         "Starting as @%s | BRAIN API: %s | %d authorised chat(s)",
