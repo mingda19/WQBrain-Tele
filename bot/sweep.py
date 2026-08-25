@@ -166,15 +166,18 @@ class SweepSettings:
             ("universe", catalog.universes),
             ("neutralization", catalog.neutralizations),
         ):
-            # Intersection: only keep values valid for EVERY region-delay pair
-            region_delay_pairs = [
+            # Compute the intersection: values valid for ALL (region, delay) pairs.
+            # Start with values from the first pair, then intersect with each remaining pair.
+            pairs = [
                 (r, d) for r in self.values("region") for d in self.values("delay")
             ]
-            if not region_delay_pairs:
-                continue
-            allowed = set(lookup(region_delay_pairs[0][0], region_delay_pairs[0][1]))
-            for r, d in region_delay_pairs[1:]:
+            if not pairs:
+                continue  # no pairs to validate against
+
+            allowed = set(lookup(pairs[0][0], pairs[0][1]))
+            for r, d in pairs[1:]:
                 allowed &= set(lookup(r, d))
+
             if not allowed:
                 continue  # catalog has nothing to say; leave the choice alone
             kept = [v for v in self.values(name) if v in allowed]
