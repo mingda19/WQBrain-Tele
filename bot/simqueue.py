@@ -270,6 +270,11 @@ class QueueWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 -- the worker must never die
+                if bundle:
+                    for row in bundle:
+                        await asyncio.to_thread(
+                            self._queue.finish, row["id"], error="worker error"
+                        )
                 log.exception("Queue worker iteration failed")
                 if bundle:
                     for row in bundle:

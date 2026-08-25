@@ -100,10 +100,10 @@ async def batch_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return ConversationHandler.END
 
     _draft(context).clear()
-    example = 'ts_rank(close,20)\nts_corr(close,volume,10)\nts_delta(vwap,5)'
+    example = pre('ts_rank(close,20)\nts_corr(close,volume,10)\nts_delta(vwap,5)')
     await update.effective_message.reply_text(
         f"{bold('New batch')}\n\nSend your expressions, one per line:\n"
-        f"{pre(example)}\n"
+        f"{example}\n"
         "Lines starting with # are ignored. /cancel to stop.",
         parse_mode=ParseMode.HTML,
     )
@@ -326,6 +326,7 @@ async def got_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.effective_message.reply_text(str(exc))
         return ASK_VALUE
 
+    draft.pop("specs", None)
     draft.pop("editing", None)
     draft.pop("specs", None)
     return await _show_settings(update, context, edit=False)
